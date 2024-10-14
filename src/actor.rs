@@ -2,9 +2,11 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use kameo::{
-    actor::{ActorRef, BoundedMailbox},
+    actor::ActorRef,
     error::BoxError,
+    mailbox::bounded::BoundedMailbox,
     message::{Context, Message},
+    request::MessageSend,
     Actor,
 };
 use tokio::{io, sync::broadcast};
@@ -68,10 +70,73 @@ impl Message<AppendToStream> for EventLog {
         msg: AppendToStream,
         _ctx: Context<'_, Self, Self::Reply>,
     ) -> Self::Reply {
+        let tx = self.next_tx();
         let timestamp = msg.timestamp.unwrap_or_else(|| Utc::now());
-        let offsets =
-            self.append_to_stream(msg.stream_id, msg.expected_version, msg.events, timestamp)?;
+        self.append_to_stream(
+            msg.stream_id,
+            msg.expected_version,
+            msg.events,
+            timestamp,
+            tx,
+        )?;
+        let offsets = self.commit(tx)?;
+
         Ok((offsets, timestamp))
+    }
+}
+
+pub struct AppendToMultipleStreams {
+    pub streams: Vec<NewStreamEvents<'static>>,
+}
+
+pub struct NewStreamEvents<'a> {
+    pub stream_id: String,
+    pub expected_version: ExpectedVersion,
+    pub events: Vec<NewEvent<'a>>,
+    pub timestamp: Option<DateTime<Utc>>,
+}
+
+impl Message<AppendToMultipleStreams> for EventLog {
+    type Reply = Result<Vec<(OffsetRange, DateTime<Utc>)>, AppendError>;
+
+    async fn handle(
+        &mut self,
+        msg: AppendToMultipleStreams,
+        _ctx: Context<'_, Self, Self::Reply>,
+    ) -> Self::Reply {
+        let tx = self.next_tx();
+
+        let mut results = Vec::with_capacity(msg.streams.len());
+        let now = Utc::now();
+        let mut stream_offset = 0;
+        for stream in msg.streams {
+            if stream.events.is_empty() {
+                continue;
+            }
+            let timestamp = stream.timestamp.unwrap_or(now);
+            let events_len = stream.events.len();
+            self.append_to_stream(
+                stream.stream_id.clone(),
+                stream.expected_version,
+                stream.events,
+                timestamp,
+                tx,
+            )?;
+
+            results.push((stream_offset, events_len, timestamp));
+            stream_offset += events_len;
+        }
+        let offsets = self.commit(tx)?;
+
+        Ok(results
+            .into_iter()
+            .map(|(stream_offset, events_len, timestamp)| {
+                (
+                    OffsetRange::new(offsets.first() + stream_offset as u64, events_len),
+                    timestamp,
+                )
+            })
+            .collect())
     }
 }
 
