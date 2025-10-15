@@ -1,3 +1,6 @@
+> [!NOTE]
+> This project is now archived and read only. [SierraDB](https://github.com/tqwewe/sierradb) is the successor for Eventus.
+
 # Eventus
 
 Sequential, disk-backed event store database built in Rust.
